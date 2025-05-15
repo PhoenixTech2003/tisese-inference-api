@@ -5,8 +5,13 @@ import requests
 import os
 import cv2
 import tempfile
+from supabase import create_client, Client
 
-async def run_inference(file: UploadFile) -> str:
+
+
+
+
+async def run_inference(file: UploadFile):
     try:
         # Validate API key and required environment variables
         api_key = os.getenv("ULTRALYTICS_API_KEY")
@@ -57,9 +62,7 @@ async def run_inference(file: UploadFile) -> str:
         
         # Parse the response
         try:
-            result = response.json()
-            print(result["images"][0]["results"][0]["box"]["x1"])
-            print(json.dumps(result, indent=2)) 
+            result = response.json() 
         except (ValueError, json.JSONDecodeError) as e:
             raise HTTPException(status_code=500, detail=f"Error parsing API response: {str(e)}")
         try:
@@ -77,30 +80,69 @@ async def run_inference(file: UploadFile) -> str:
             image = cv2.imread(temp_file_path)
             if image is None:
                 raise Exception(f"Failed to read image from {temp_file_path}")
+            
+            # Check if the result contains the expected data structure
+            if not result.get("images") or len(result["images"]) == 0:
+                raise Exception("No images found in the result")
+                
+            if not result["images"][0].get("results") or len(result["images"][0]["results"]) == 0:
+                # No detection results, return the original image
+                print("No detection results found in the API response")
+                # Clean up the temporary file
+                os.unlink(temp_file_path)
+                
+                # Convert the image to bytes directly without saving to disk
+                _, buffer = cv2.imencode('.jpg', image)
+                image_bytes = buffer.tobytes()
+                
+                return {
+                    "original_file": file,
+                    "image_bytes": image_bytes,
+                    "filename": file.filename
+                }
                 
             # Get bounding box coordinates
-            x1 = int(result["images"][0]["results"][0]["box"]["x1"])
-            y1 = int(result["images"][0]["results"][0]["box"]["y1"])
-            x2 = int(result["images"][0]["results"][0]["box"]["x2"])
-            y2 = int(result["images"][0]["results"][0]["box"]["y2"])
+            box = result["images"][0]["results"][0].get("box", {})
+            if not box or not all(k in box for k in ["x1", "y1", "x2", "y2"]):
+                # Missing box coordinates, return the original image
+                print("Missing box coordinates in the API response")
+                # Clean up the temporary file
+                os.unlink(temp_file_path)
+                
+                # Convert the image to bytes directly without saving to disk
+                _, buffer = cv2.imencode('.jpg', image)
+                image_bytes = buffer.tobytes()
+                
+                return {
+                    "original_file": file,
+                    "image_bytes": image_bytes,
+                    "filename": file.filename
+                }
+            
+            x1 = int(box["x1"])
+            y1 = int(box["y1"])
+            x2 = int(box["x2"])
+            y2 = int(box["y2"])
             
             # Draw rectangle on image
             cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
             
-            # Save the image with bounding box
-            output_path = f"output_{file.filename}"
-            cv2.imwrite(output_path, image)
-            
             # Clean up the temporary file
             os.unlink(temp_file_path)
             
-            # For server environments, we don't use imshow as it requires a GUI
-            # Instead, we save the image and return its path
-            print(f"Image with bounding box saved to {output_path}")
+            # Convert the image to bytes directly without saving to disk
+            # Encode the image to the appropriate format (JPEG)
+            _, buffer = cv2.imencode('.jpg', image)
+            image_bytes = buffer.tobytes()
+            
+            # Return the image bytes and filename for use in save_to_supabase_storage
+            return {
+                "original_file": file,
+                "image_bytes": image_bytes,
+                "filename": file.filename
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
-        # Return the results URL from the response if available, otherwise return filename
-        return image
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -111,11 +153,39 @@ async def run_inference(file: UploadFile) -> str:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
     
-    
-    
-async def save_to_supabase_storage(inference_image:Annotated[UploadFile, Depends(run_inference)]):
+def SupabaseClient() -> Client:
     try:
+        url: str = os.getenv("SUPABASE_URL")
+        key: str = os.getenv("SUPABASE_KEY")
+        supabase: Client = create_client(url, key)    
+        return supabase
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading Supabase client: {str(e)}")
+    
+async def save_to_supabase_storage(inference_result: Annotated[dict, Depends(run_inference)], supabase: Client = Depends(SupabaseClient)):
+    try:
+        # Get the image bytes and filename from the inference result
+        image_bytes = inference_result["image_bytes"]
+        filename = inference_result["filename"]
         
-        print()    
+        # Upload the processed image bytes directly to Supabase
+        bucket_name = os.getenv("SUPABASE_STORAGE_BUCKET")
+        if not bucket_name:
+            raise HTTPException(status_code=500, detail="SUPABASE_STORAGE_BUCKET environment variable not set")
+            
+        response = (
+            supabase.storage
+            .from_(bucket_name)
+            .upload(
+                path=f"inference/output_{filename}",
+                file=image_bytes,
+                file_options={"cache-control": "3600", "upsert": "true"}
+            )
+        )
+        
+        # Get the public URL for the uploaded file
+        file_url = supabase.storage.from_(bucket_name).get_public_url(f"inference/output_{filename}")
+        
+        return file_url
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving image to Supabase: {str(e)}")

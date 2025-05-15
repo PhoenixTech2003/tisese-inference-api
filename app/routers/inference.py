@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from typing import Annotated
 from fastapi import Depends
-from ..dependencies import run_inference
+from ..dependencies import save_to_supabase_storage
 import os
 
 router = APIRouter(
@@ -10,6 +10,6 @@ router = APIRouter(
 )
 
 @router.post("/")
-async def postInference(resultsUrl: Annotated[str, Depends(run_inference)]):
-    print(os.getenv("ULTRALYTICS_API_KEY"))
+async def postInference(resultsUrl: Annotated[str, Depends(save_to_supabase_storage)]):
+
     return {"resultsUrl":resultsUrl}
