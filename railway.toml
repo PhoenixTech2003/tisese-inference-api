@@ -1,0 +1,9 @@
+[build]
+nixpkgs_version = "23.11"
+
+[deploy]
+startCommand = "hypercorn app.main:app --bind \"[::]:$PORT\""
+restartPolicyType = "ON_FAILURE"
+
+[phases.setup]
+nixPkgs = ["libGL", "mesa", "xorg.libX11", "xorg.libXrender", "xorg.libXext"]
